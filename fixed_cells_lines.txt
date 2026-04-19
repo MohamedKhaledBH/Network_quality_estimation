@@ -1,0 +1,586 @@
+## Cell 1 [markdown]
+L1: # Project 1 — Network Quality Estimation from Radio Signal Spectrograms
+L2: 
+L3: **Dataset:** DeepSig RadioML / GOLD_XYZ_OSC.0001_1024  
+L4: **Approach:** Convert IQ samples → spectrograms → CNN classification  
+L5: **Classes:** 0 = Poor, 1 = Average, 2 = Good (based on SNR)  
+L6: **Models:** Simple CNN from scratch · Improved CNN · MobileNetV2 Transfer Learning
+
+## Cell 2 [markdown]
+L1: ## 1. Imports
+
+## Cell 3 [code]
+L1: import numpy as np
+L2: import cv2
+L3: import h5py
+L4: import tensorflow as tf
+L5: import seaborn as sns
+L6: import matplotlib.pyplot as plt
+L7: import matplotlib.gridspec as gridspec
+L8: 
+L9: from scipy.signal import spectrogram
+L10: from sklearn.model_selection import train_test_split
+L11: from sklearn.metrics import confusion_matrix, classification_report
+L12: 
+L13: print('TensorFlow version:', tf.__version__)
+L14: print('GPU available:', bool(tf.config.list_physical_devices('GPU')))
+
+## Cell 4 [markdown]
+L1: ## 2. Load Dataset
+
+## Cell 5 [code]
+L1: # Load the DeepSig HDF5 dataset
+L2: # X contains IQ samples of shape (N, 2, 1024)
+L3: # Z contains metadata: [SNR, modulation_index]
+L4: with h5py.File('archive/GOLD_XYZ_OSC.0001_1024.hdf5', 'r') as f:
+L5:     X = f['X'][:]   # IQ samples
+L6:     Z = f['Z'][:]   # labels / metadata
+L7: 
+L8: print('X shape:', X.shape)  # expected: (N, 2, 1024)
+L9: print('Z shape:', Z.shape)
+
+## Cell 6 [markdown]
+L1: ## 3. Label Creation — SNR → Quality Class
+
+## Cell 7 [code]
+L1: def snr_to_quality(snr):
+L2:     """Map SNR (dB) to a 3-class quality label.
+L3:     
+L4:     SNR > 10 dB  → class 2 (Good)
+L5:     SNR 0–10 dB  → class 1 (Average)
+L6:     SNR < 0 dB   → class 0 (Poor)
+L7:     """
+L8:     if snr > 10:
+L9:         return 2
+L10:     elif snr >= 0:
+L11:         return 1
+L12:     else:
+L13:         return 0
+L14: 
+L15: y_quality = np.array([snr_to_quality(s[0]) for s in Z])
+L16: print('Class distribution:', dict(zip(*np.unique(y_quality, return_counts=True))))
+
+## Cell 8 [markdown]
+L1: ## 4. Spectrogram Function
+L2: 
+L3: Converts a raw IQ sample (2 × 1024 array) into a 128×128 grayscale image.
+
+## Cell 9 [code]
+L1: def fast_spectrogram(iq_signal):
+L2:     """Convert an IQ sample to a log-magnitude spectrogram image.
+L3:     
+L4:     Steps:
+L5:     1. Combine I and Q into a complex signal
+L6:     2. Compute the power spectrogram (time vs frequency)
+L7:     3. Apply log1p to compress dynamic range
+L8:     4. Resize to 128x128 pixels for the CNN
+L9:     """
+L10:     complex_signal = iq_signal[0] + 1j * iq_signal[1]
+L11:     signal_length = len(complex_signal)
+L12:     nperseg  = min(128, signal_length)   # window size
+L13:     noverlap = int(nperseg // 2)         # 50% overlap
+L14: 
+L15:     _, _, Sxx = spectrogram(
+L16:         complex_signal,
+L17:         nperseg=nperseg,
+L18:         noverlap=noverlap
+L19:     )
+L20: 
+L21:     Sxx = np.log1p(np.abs(Sxx))           # log-magnitude
+L22:     return cv2.resize(Sxx, (128, 128))     # resize to (128, 128)
+
+## Cell 10 [markdown]
+L1: ## 5. Exploratory Data Analysis (EDA)
+
+## Cell 11 [code]
+L1: snr_values = np.array([s[0] for s in Z])
+L2: 
+L3: print('=== SNR Statistics ===')
+L4: print(f'Min:  {np.min(snr_values):.2f} dB')
+L5: print(f'Max:  {np.max(snr_values):.2f} dB')
+L6: print(f'Mean: {np.mean(snr_values):.2f} dB')
+L7: print(f'Std:  {np.std(snr_values):.2f} dB')
+L8: 
+L9: print('\n=== Per-class SNR ===')
+L10: for c, name in [(0, 'Poor'), (1, 'Average'), (2, 'Good')]:
+L11:     snr_c = snr_values[y_quality == c]
+L12:     print(f'  Class {c} ({name:7s}): count={len(snr_c):6d}, '
+L13:           f'mean={np.mean(snr_c):6.1f} dB, '
+L14:           f'range=[{np.min(snr_c):.0f}, {np.max(snr_c):.0f}] dB')
+
+## Cell 12 [code]
+L1: # Check for NaN / Inf
+L2: print('NaN in X:',  np.isnan(X).sum())
+L3: print('NaN in Z:',  np.isnan(Z).sum())
+L4: print('Inf in X:',  np.isinf(X).sum())
+
+## Cell 13 [code]
+L1: # Class distribution bar chart
+L2: fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+L3: 
+L4: sns.countplot(x=y_quality, ax=axes[0], palette=['#E24B4A','#EF9F27','#1D9E75'])
+L5: axes[0].set_title('Class Distribution (all data)')
+L6: axes[0].set_xlabel('Quality Class (0=Poor, 1=Average, 2=Good)')
+L7: axes[0].set_ylabel('Count')
+L8: 
+L9: sns.histplot(snr_values, bins=40, ax=axes[1], color='steelblue')
+L10: axes[1].axvline(0,  color='orange', linestyle='--', label='SNR=0 dB')
+L11: axes[1].axvline(10, color='green',  linestyle='--', label='SNR=10 dB')
+L12: axes[1].set_title('SNR Distribution')
+L13: axes[1].set_xlabel('SNR (dB)')
+L14: axes[1].legend()
+L15: 
+L16: plt.tight_layout()
+L17: plt.show()
+
+## Cell 14 [code]
+L1: # Visualize sample spectrograms for each quality class
+L2: fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+L3: class_names = ['Poor (SNR<0)', 'Average (0–10 dB)', 'Good (SNR>10)']
+L4: 
+L5: for c in range(3):
+L6:     idx = np.where(y_quality == c)[0][0]
+L7:     spec = fast_spectrogram(X[idx])
+L8:     axes[c].imshow(spec, aspect='auto', origin='lower', cmap='inferno')
+L9:     axes[c].set_title(f'Class {c} — {class_names[c]}')
+L10:     axes[c].set_xlabel('Time')
+L11:     axes[c].set_ylabel('Frequency')
+L12: 
+L13: plt.suptitle('Sample Spectrograms per Quality Class', fontsize=13)
+L14: plt.tight_layout()
+L15: plt.show()
+
+## Cell 15 [code]
+L1: # Mean spectrogram per class (shows average time-frequency pattern)
+L2: fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+L3: class_names = ['Poor', 'Average', 'Good']
+L4: 
+L5: for c in range(3):
+L6:     idx = np.where(y_quality == c)[0][:200]
+L7:     specs = np.array([fast_spectrogram(X[i]) for i in idx])
+L8:     mean_spec = np.mean(specs, axis=0)
+L9:     im = axes[c].imshow(mean_spec, aspect='auto', origin='lower', cmap='inferno')
+L10:     axes[c].set_title(f'Mean Spectrogram — Class {c} ({class_names[c]})')
+L11:     plt.colorbar(im, ax=axes[c])
+L12: 
+L13: plt.suptitle('Average Spectrogram per Quality Class', fontsize=13)
+L14: plt.tight_layout()
+L15: plt.show()
+
+## Cell 16 [markdown]
+L1: ## 6. Balanced Sampling
+L2: 
+L3: We select 4 000 samples per class to avoid class imbalance, then shuffle.
+
+## Cell 17 [code]
+L1: np.random.seed(42)
+L2: 
+L3: # --- FIX: work on indices only, never shuffle the full X array ---
+L4: 
+L5: # Get indices for each class BEFORE loading spectrograms
+L6: idx_0 = np.where(y_quality == 0)[0]
+L7: idx_1 = np.where(y_quality == 1)[0]
+L8: idx_2 = np.where(y_quality == 2)[0]
+L9: 
+L10: # Shuffle each class's indices independently
+L11: np.random.shuffle(idx_0)
+L12: np.random.shuffle(idx_1)
+L13: np.random.shuffle(idx_2)
+L14: 
+L15: # Take n samples per class
+L16: n_per_class = 4000
+L17: selected_idx = np.concatenate([idx_0[:n_per_class],
+L18:                                 idx_1[:n_per_class],
+L19:                                 idx_2[:n_per_class]])
+L20: 
+L21: # Shuffle the final combined index list
+L22: np.random.shuffle(selected_idx)
+L23: 
+L24: # NOW load only the 12,000 samples we actually need
+L25: X_small = X[selected_idx]
+L26: y_small = y_quality[selected_idx]
+L27: 
+L28: print(f'Total samples selected: {len(X_small)}')
+L29: print('Class counts:', dict(zip(*np.unique(y_small, return_counts=True))))
+
+## Cell 18 [markdown]
+L1: ## 7. Build Spectrogram Dataset
+
+## Cell 19 [code]
+L1: print('Converting IQ samples to spectrograms...')
+L2: X_spec = np.array([fast_spectrogram(x) for x in X_small])
+L3: 
+L4: # Cast to float32 and normalise to [0, 1]
+L5: X_spec = X_spec.astype('float32')
+L6: X_spec = (X_spec - X_spec.min()) / (X_spec.max() - X_spec.min())
+L7: 
+L8: # Add channel dimension: (N, 128, 128) → (N, 128, 128, 1)
+L9: X_spec = np.expand_dims(X_spec, axis=-1)
+L10: 
+L11: print('Final dataset shape:', X_spec.shape)
+L12: print('Value range: [{:.3f}, {:.3f}]'.format(X_spec.min(), X_spec.max()))
+
+## Cell 20 [markdown]
+L1: ## 8. Train / Test Split
+
+## Cell 21 [code]
+L1: X_train, X_test, y_train, y_test = train_test_split(
+L2:     X_spec, y_small,
+L3:     test_size=0.2,
+L4:     stratify=y_small,
+L5:     random_state=42
+L6: )
+L7: 
+L8: print(f'Train: {X_train.shape}  Test: {X_test.shape}')
+L9: print('Train class counts:', dict(zip(*np.unique(y_train, return_counts=True))))
+L10: print('Test  class counts:', dict(zip(*np.unique(y_test,  return_counts=True))))
+
+## Cell 22 [markdown]
+L1: ## 9. Callbacks
+L2: 
+L3: Defined once and reused for all three models.
+
+## Cell 23 [code]
+L1: # EarlyStopping — stops training when val_loss stops improving
+L2: # ReduceLROnPlateau — halves the learning rate when stuck
+L3: # Both are regularization techniques that prevent overfitting
+L4: 
+L5: def get_callbacks():
+L6:     return [
+L7:         tf.keras.callbacks.EarlyStopping(
+L8:             monitor='val_loss',
+L9:             patience=4,
+L10:             restore_best_weights=True,
+L11:             verbose=1
+L12:         ),
+L13:         tf.keras.callbacks.ReduceLROnPlateau(
+L14:             monitor='val_loss',
+L15:             patience=2,
+L16:             factor=0.5,
+L17:             min_lr=1e-6,
+L18:             verbose=1
+L19:         )
+L20:     ]
+
+## Cell 24 [markdown]
+L1: ## 10. Helper — Training Curve Plotter
+
+## Cell 25 [code]
+L1: def plot_history(history, title='Training History'):
+L2:     """Plot accuracy and loss curves for both train and validation sets."""
+L3:     fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+L4: 
+L5:     # Accuracy
+L6:     axes[0].plot(history.history['accuracy'],     label='Train', linewidth=2)
+L7:     axes[0].plot(history.history['val_accuracy'], label='Val',   linewidth=2, linestyle='--')
+L8:     axes[0].set_title(f'{title} — Accuracy')
+L9:     axes[0].set_xlabel('Epoch')
+L10:     axes[0].set_ylabel('Accuracy')
+L11:     axes[0].legend()
+L12:     axes[0].grid(True, alpha=0.3)
+L13: 
+L14:     # Loss
+L15:     axes[1].plot(history.history['loss'],     label='Train', linewidth=2)
+L16:     axes[1].plot(history.history['val_loss'], label='Val',   linewidth=2, linestyle='--')
+L17:     axes[1].set_title(f'{title} — Loss')
+L18:     axes[1].set_xlabel('Epoch')
+L19:     axes[1].set_ylabel('Loss')
+L20:     axes[1].legend()
+L21:     axes[1].grid(True, alpha=0.3)
+L22: 
+L23:     plt.tight_layout()
+L24:     plt.show()
+L25: 
+L26: 
+L27: def evaluate_model(model, X_test, y_test, title='Model'):
+L28:     """Print classification report and plot confusion matrix."""
+L29:     y_pred = np.argmax(model.predict(X_test), axis=1)
+L30: 
+L31:     cm = confusion_matrix(y_test, y_pred)
+L32:     plt.figure(figsize=(6, 5))
+L33:     sns.heatmap(
+L34:         cm, annot=True, fmt='d', cmap='Blues',
+L35:         xticklabels=['Poor','Average','Good'],
+L36:         yticklabels=['Poor','Average','Good']
+L37:     )
+L38:     plt.title(f'Confusion Matrix — {title}')
+L39:     plt.ylabel('True Label')
+L40:     plt.xlabel('Predicted Label')
+L41:     plt.tight_layout()
+L42:     plt.show()
+L43: 
+L44:     print(f'\n=== Classification Report — {title} ===')
+L45:     print(classification_report(y_test, y_pred,
+L46:                                 target_names=['Poor','Average','Good']))
+L47:     return y_pred
+
+## Cell 26 [markdown]
+L1: ## 11. Model 1 — Simple CNN from Scratch
+L2: 
+L3: A lightweight baseline CNN with 3 convolutional blocks.  
+L4: Uses `GlobalAveragePooling2D` instead of `Flatten` to reduce overfitting.
+
+## Cell 27 [code]
+L1: def build_simple_cnn(input_shape):
+L2:     """Simple CNN baseline — 3 conv blocks, GlobalAveragePooling."""
+L3:     model = tf.keras.Sequential([
+L4:         # Block 1
+L5:         tf.keras.layers.Conv2D(16, (3,3), activation='relu', input_shape=input_shape),
+L6:         tf.keras.layers.MaxPooling2D(),
+L7: 
+L8:         # Block 2
+L9:         tf.keras.layers.Conv2D(32, (3,3), activation='relu'),
+L10:         tf.keras.layers.MaxPooling2D(),
+L11: 
+L12:         # Block 3
+L13:         tf.keras.layers.Conv2D(64, (3,3), activation='relu'),
+L14:         tf.keras.layers.MaxPooling2D(),
+L15: 
+L16:         # Classifier head
+L17:         tf.keras.layers.GlobalAveragePooling2D(),
+L18:         tf.keras.layers.Dense(256, activation='relu'),
+L19:         tf.keras.layers.Dropout(0.3),
+L20:         tf.keras.layers.Dense(3, activation='softmax')
+L21:     ], name='Simple_CNN')
+L22:     return model
+L23: 
+L24: tf.keras.backend.clear_session()
+L25: model1 = build_simple_cnn(X_train.shape[1:])
+L26: model1.summary()
+
+## Cell 28 [code]
+L1: model1.compile(
+L2:     optimizer='adam',
+L3:     loss='sparse_categorical_crossentropy',
+L4:     metrics=['accuracy']
+L5: )
+L6: 
+L7: history1 = model1.fit(
+L8:     X_train, y_train,
+L9:     epochs=30,                            # EarlyStopping will stop it early
+L10:     batch_size=64,
+L11:     validation_data=(X_test, y_test),
+L12:     callbacks=get_callbacks(),            # FIX: callbacks now properly used
+L13:     verbose=1
+L14: )
+
+## Cell 29 [code]
+L1: plot_history(history1, 'Model 1 — Simple CNN')
+L2: y_pred1 = evaluate_model(model1, X_test, y_test, 'Model 1 — Simple CNN')
+
+## Cell 30 [markdown]
+L1: ## 12. Model 2 — Improved CNN with BatchNorm & Dropout
+L2: 
+L3: Adds `BatchNormalization` after each conv block (faster training, more stable)  
+L4: and stronger `Dropout` regularization to reduce overfitting.
+
+## Cell 31 [code]
+L1: def build_improved_cnn(input_shape):
+L2:     """Improved CNN with BatchNorm + Dropout regularization."""
+L3:     model = tf.keras.Sequential([
+L4:         # Block 1
+L5:         tf.keras.layers.Conv2D(32, (3,3), padding='same', activation='relu', input_shape=input_shape),
+L6:         tf.keras.layers.BatchNormalization(),
+L7:         tf.keras.layers.MaxPooling2D(),
+L8:         tf.keras.layers.Dropout(0.25),
+L9: 
+L10:         # Block 2
+L11:         tf.keras.layers.Conv2D(64, (3,3), padding='same', activation='relu'),
+L12:         tf.keras.layers.BatchNormalization(),
+L13:         tf.keras.layers.MaxPooling2D(),
+L14:         tf.keras.layers.Dropout(0.3),
+L15: 
+L16:         # Block 3
+L17:         tf.keras.layers.Conv2D(128, (3,3), padding='same', activation='relu'),
+L18:         tf.keras.layers.BatchNormalization(),
+L19:         tf.keras.layers.MaxPooling2D(),
+L20:         tf.keras.layers.Dropout(0.4),
+L21: 
+L22:         # Classifier head
+L23:         tf.keras.layers.GlobalAveragePooling2D(),
+L24:         tf.keras.layers.Dense(128, activation='relu'),
+L25:         tf.keras.layers.BatchNormalization(),
+L26:         tf.keras.layers.Dropout(0.5),
+L27:         tf.keras.layers.Dense(3, activation='softmax')
+L28:     ], name='Improved_CNN')
+L29:     return model
+L30: 
+L31: tf.keras.backend.clear_session()
+L32: model2 = build_improved_cnn(X_train.shape[1:])
+L33: model2.summary()
+
+## Cell 32 [code]
+L1: model2.compile(
+L2:     optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+L3:     loss='sparse_categorical_crossentropy',
+L4:     metrics=['accuracy']
+L5: )
+L6: 
+L7: history2 = model2.fit(
+L8:     X_train, y_train,
+L9:     epochs=30,
+L10:     batch_size=64,
+L11:     validation_data=(X_test, y_test),
+L12:     callbacks=get_callbacks(),            # FIX: callbacks used correctly
+L13:     verbose=1
+L14: )
+
+## Cell 33 [code]
+L1: plot_history(history2, 'Model 2 — Improved CNN')
+L2: y_pred2 = evaluate_model(model2, X_test, y_test, 'Model 2 — Improved CNN')
+
+## Cell 34 [markdown]
+L1: ## 13. Model 3 — Transfer Learning with MobileNetV2
+L2: 
+L3: MobileNetV2 was pretrained on ImageNet (millions of images).  
+L4: We freeze its weights and use it as a feature extractor.  
+L5: Our spectrograms are grayscale (1 channel) — we repeat them to get 3 channels  
+L6: so the pretrained model can process them.
+
+## Cell 35 [code]
+L1: def build_transfer_model(input_shape):
+L2:     """Transfer Learning: MobileNetV2 pretrained on ImageNet as feature extractor.
+L3:     
+L4:     The base model weights are frozen — we only train the new classifier head.
+L5:     Grayscale input (1 channel) is repeated to 3 channels to match ImageNet format.
+L6:     """
+L7:     # Load MobileNetV2 without the top classification layer
+L8:     base_model = tf.keras.applications.MobileNetV2(
+L9:         input_shape=(128, 128, 3),
+L10:         include_top=False,
+L11:         weights='imagenet'
+L12:     )
+L13:     base_model.trainable = False  # freeze pretrained weights
+L14: 
+L15:     # Build the full model
+L16:     inputs = tf.keras.Input(shape=input_shape)              # (128,128,1)
+L17: 
+L18:     # Repeat grayscale channel 3 times → (128,128,3)
+L19:     x = tf.keras.layers.Lambda(
+L20:         lambda t: tf.repeat(t, 3, axis=-1),
+L21:         name='grayscale_to_rgb'
+L22:     )(inputs)
+L23: 
+L24:     # Rescale to MobileNetV2 expected range [-1, 1]
+L25:     x = tf.keras.layers.Rescaling(scale=2.0, offset=-1.0)(x)
+L26: 
+L27:     # Feature extraction (frozen)
+L28:     x = base_model(x, training=False)
+L29:     x = tf.keras.layers.GlobalAveragePooling2D()(x)
+L30: 
+L31:     # Classifier head (trainable)
+L32:     x = tf.keras.layers.Dense(128, activation='relu')(x)
+L33:     x = tf.keras.layers.Dropout(0.3)(x)
+L34:     outputs = tf.keras.layers.Dense(3, activation='softmax')(x)
+L35: 
+L36:     return tf.keras.Model(inputs, outputs, name='MobileNetV2_Transfer')
+L37: 
+L38: tf.keras.backend.clear_session()
+L39: model3 = build_transfer_model(X_train.shape[1:])
+L40: model3.summary()
+
+## Cell 36 [code]
+L1: model3.compile(
+L2:     optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+L3:     loss='sparse_categorical_crossentropy',
+L4:     metrics=['accuracy']
+L5: )
+L6: 
+L7: history3 = model3.fit(
+L8:     X_train, y_train,
+L9:     epochs=20,
+L10:     batch_size=64,
+L11:     validation_data=(X_test, y_test),
+L12:     callbacks=get_callbacks(),
+L13:     verbose=1
+L14: )
+
+## Cell 37 [code]
+L1: plot_history(history3, 'Model 3 — MobileNetV2 Transfer Learning')
+L2: y_pred3 = evaluate_model(model3, X_test, y_test, 'Model 3 — MobileNetV2 Transfer')
+
+## Cell 38 [markdown]
+L1: ## 14. Model Comparison
+
+## Cell 39 [code]
+L1: from sklearn.metrics import accuracy_score, f1_score
+L2: 
+L3: results = {
+L4:     'Model 1 — Simple CNN':         (history1, y_pred1),
+L5:     'Model 2 — Improved CNN':        (history2, y_pred2),
+L6:     'Model 3 — MobileNetV2 Transfer':(history3, y_pred3),
+L7: }
+L8: 
+L9: header = f"{'Model':<32} {'Val Accuracy':>14} {'Test Accuracy':>14} {'F1-Score':>10}"
+L10: print(header)
+L11: print('-' * 74)
+L12: 
+L13: for name, (hist, y_pred) in results.items():
+L14:     val_acc  = max(hist.history['val_accuracy'])
+L15:     test_acc = accuracy_score(y_test, y_pred)
+L16:     f1       = f1_score(y_test, y_pred, average='macro')
+L17:     row = f"{name:<32} {val_acc:>14.4f} {test_acc:>14.4f} {f1:>10.4f}"
+L18:     print(row)
+
+## Cell 40 [code]
+L1: # Bar chart comparison
+L2: from sklearn.metrics import accuracy_score, f1_score
+L3: 
+L4: model_names = ['Simple CNN', 'Improved CNN', 'MobileNetV2']
+L5: val_accs  = [max(h.history['val_accuracy']) for h, _ in results.values()]
+L6: test_accs = [accuracy_score(y_test, p) for _, p in results.values()]
+L7: f1_scores = [f1_score(y_test, p, average='macro') for _, p in results.values()]
+L8: 
+L9: x = np.arange(len(model_names))
+L10: width = 0.26
+L11: 
+L12: fig, ax = plt.subplots(figsize=(10, 5))
+L13: ax.bar(x - width, val_accs,  width, label='Val Accuracy',  color='#378ADD')
+L14: ax.bar(x,         test_accs, width, label='Test Accuracy', color='#1D9E75')
+L15: ax.bar(x + width, f1_scores, width, label='Macro F1',      color='#EF9F27')
+L16: 
+L17: ax.set_xticks(x)
+L18: ax.set_xticklabels(model_names)
+L19: ax.set_ylabel('Score')
+L20: ax.set_ylim(0, 1.05)
+L21: ax.set_title('Model Comparison — Accuracy & F1 Score')
+L22: ax.legend()
+L23: ax.grid(axis='y', alpha=0.3)
+L24: 
+L25: for i, (va, ta, f1) in enumerate(zip(val_accs, test_accs, f1_scores)):
+L26:     ax.text(i - width, va  + 0.01, f'{va:.3f}',  ha='center', fontsize=9)
+L27:     ax.text(i,         ta  + 0.01, f'{ta:.3f}',  ha='center', fontsize=9)
+L28:     ax.text(i + width, f1  + 0.01, f'{f1:.3f}',  ha='center', fontsize=9)
+L29: 
+L30: plt.tight_layout()
+L31: plt.show()
+
+## Cell 41 [markdown]
+L1: ## 15. Conclusion
+L2: 
+L3: ### Summary
+L4: 
+L5: | Model | Architecture | Regularization | Notes |
+L6: |-------|-------------|----------------|-------|
+L7: | Simple CNN | 3 conv blocks | Dropout 0.3 | Lightweight baseline |
+L8: | Improved CNN | 3 conv blocks + BatchNorm | Dropout per block | Faster, more stable training |
+L9: | MobileNetV2 | Pretrained ImageNet backbone | Dropout, frozen base | Best generalization |
+L10: 
+L11: ### Key Observations
+L12: 
+L13: - **EarlyStopping** prevented overfitting by halting training when validation loss stopped improving.
+L14: - **ReduceLROnPlateau** automatically reduced the learning rate when the model plateaued.
+L15: - **Balanced sampling** (4 000 per class) ensured the models are not biased toward any quality level.
+L16: - **Log-magnitude spectrograms** effectively represent the time-frequency structure of IQ signals.
+L17: - **Transfer Learning** (MobileNetV2) typically achieves the best performance even with limited data,  
+L18:   because the pretrained feature extractor already understands low-level patterns (edges, textures).
+L19: 
+L20: ### CRISP-DM Alignment
+L21: 
+L22: 1. **Business Understanding** — Classify radio signal quality for cell optimization and QoS monitoring.
+L23: 2. **Data Understanding** — EDA of SNR distribution, class balance, and spectrogram visualization.
+L24: 3. **Data Preparation** — IQ → spectrogram, normalization, balanced sampling, train/test split.
+L25: 4. **Modeling** — Three CNN architectures with increasing complexity.
+L26: 5. **Evaluation** — Accuracy, F1-score, confusion matrices, and training curves.
+L27: 6. **Deployment** — Model can be saved with `model.save()` and served via TensorFlow Serving.
+
